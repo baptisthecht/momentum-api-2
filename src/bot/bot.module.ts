@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BotService } from './bot.service';
 import { BitgetClientService } from './bitget-client.service';
+import { BitgetWsService } from './bitget-ws.service';
 import { Session } from '../session/session.entity';
 import { Candle } from '../candle/candle.entity';
 import { Position } from '../position/position.entity';
@@ -15,7 +16,7 @@ import { StrategyModule } from '../strategy/strategy.module';
     TypeOrmModule.forFeature([Session, Candle, Position, Trade, PositionTpTarget, SignalEvaluation, SignalConditionCheck]),
     StrategyModule,
   ],
-  providers: [BotService, BitgetClientService],
+  providers: [BotService, BitgetClientService, BitgetWsService],
   exports: [BotService, BitgetClientService],
 })
 export class BotModule {}

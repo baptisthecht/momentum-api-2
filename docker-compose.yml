@@ -22,7 +22,7 @@ services:
     image: dpage/pgadmin4:latest
     container_name: momentum-pgadmin
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@momentum.fr
+      PGADMIN_DEFAULT_EMAIL: admin@momentum.local
       PGADMIN_DEFAULT_PASSWORD: admin
       PGADMIN_CONFIG_SERVER_MODE: 'False'
     ports:

@@ -1,6 +1,6 @@
 import { Module } from "@nestjs/common";
 import { ConfigModule, ConfigService } from "@nestjs/config";
-import { ScheduleModule } from "@nestjs/schedule";
+import { EventEmitterModule } from "@nestjs/event-emitter";
 import { TypeOrmModule } from "@nestjs/typeorm";
 
 import { AuthModule } from "./auth/auth.module";
@@ -31,16 +31,16 @@ import { UserModule } from "./user/user.module";
 @Module({
 	imports: [
 		ConfigModule.forRoot({ isGlobal: true }),
-		ScheduleModule.forRoot(),
+		EventEmitterModule.forRoot(),
 		TypeOrmModule.forRootAsync({
 			inject: [ConfigService],
 			useFactory: (c: ConfigService) => ({
 				type: "postgres" as const,
-				host: c.get("DB_HOST", "localhost"),
+				host: c.get<string>("DB_HOST", "localhost"),
 				port: c.get<number>("DB_PORT", 5432),
-				username: c.get("DB_USERNAME", "momentum"),
-				password: c.get("DB_PASSWORD", "momentum_secret"),
-				database: c.get("DB_NAME", "momentum"),
+				username: c.get<string>("DB_USERNAME", "momentum"),
+				password: c.get<string>("DB_PASSWORD", "momentum_secret"),
+				database: c.get<string>("DB_NAME", "momentum"),
 				entities: [
 					User,
 					Strategy,
@@ -56,7 +56,7 @@ import { UserModule } from "./user/user.module";
 					SignalConditionCheck,
 				],
 				synchronize: true, // Use migrations in production
-				logging: c.get("NODE_ENV") === "development",
+				// logging: c.get("NODE_ENV") === "development",
 			}),
 		}),
 		AuthModule,
