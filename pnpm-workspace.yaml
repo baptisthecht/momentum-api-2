@@ -2,3 +2,5 @@ onlyBuiltDependencies:
   - '@nestjs/core'
   - '@scarf/scarf'
   - bcrypt
+packages:
+  - 'packages/*'
