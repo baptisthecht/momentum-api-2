@@ -423,7 +423,7 @@ export class BotService implements OnModuleInit {
 		return (
 			await this.candleRepo.find({
 				where: { symbol: sym, granularity: gran },
-				order: { openTime: "ASC" },
+				order: { openTime: "DESC" },
 				take: lim,
 			})
 		).map((r) => ({
