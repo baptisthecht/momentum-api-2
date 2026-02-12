@@ -420,13 +420,13 @@ export class BotService implements OnModuleInit {
 		gran: string,
 		lim: number,
 	): Promise<OhlcvBar[]> {
-		return (
-			await this.candleRepo.find({
-				where: { symbol: sym, granularity: gran },
-				order: { openTime: "DESC" },
-				take: lim,
-			})
-		).map((r) => ({
+		const c = await this.candleRepo.find({
+		  where: { symbol: sym, granularity: gran },
+		  order: { openTime: 'DESC' },
+		  take: lim,
+		});
+		c.reverse(); // DESC → ASC : oldest first, newest last
+		return c.map((r) => ({
 			openTime: r.openTime,
 			open: r.open,
 			high: r.high,
