@@ -1,149 +1,191 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { EventEmitter2 } from '@nestjs/event-emitter';
-import { WebSocket } from 'ws';
+import {
+	Injectable,
+	Logger,
+	OnModuleDestroy,
+	OnModuleInit,
+} from "@nestjs/common";
+import { EventEmitter2 } from "@nestjs/event-emitter";
+import { WebSocket } from "ws";
 
-const WS_URL = 'wss://ws.bitget.com/v2/ws/public';
+const WS_URL = "wss://ws.bitget.com/v2/ws/public";
 
-export const TRACKED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'ADAUSDT'];
-export const GRANULARITY = '5m';
+export const TRACKED_SYMBOLS = [
+	"BTCUSDT",
+	"ETHUSDT",
+	"SOLUSDT",
+	"XRPUSDT",
+	"ADAUSDT",
+];
+export const GRANULARITY = "5m";
 
 export interface CandleEvent {
-  symbol: string;
-  granularity: string;
-  openTime: Date;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
+	symbol: string;
+	granularity: string;
+	openTime: Date;
+	open: number;
+	high: number;
+	low: number;
+	close: number;
+	volume: number;
 }
 
 @Injectable()
 export class BitgetWsService implements OnModuleInit, OnModuleDestroy {
-  private readonly log = new Logger(BitgetWsService.name);
-  private ws: WebSocket | null = null;
-  private alive = true;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private pingTimer: ReturnType<typeof setInterval> | null = null;
+	private readonly log = new Logger(BitgetWsService.name);
+	private ws: WebSocket | null = null;
+	private alive = true;
+	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+	private pingTimer: ReturnType<typeof setInterval> | null = null;
 
-  /**
-   * Track the last closed candle openTime per symbol.
-   * On WS reconnect, Bitget sends a snapshot of ALL recent candles with confirm=1.
-   * Without this guard, we'd emit 500 candle.closed events in <1 second.
-   * We only emit candle.closed for NEW candles (openTime > lastProcessed).
-   */
-  private lastClosedTime = new Map<string, number>();
+	/**
+	 * Track the last closed candle openTime per symbol.
+	 * On WS reconnect, Bitget sends a snapshot of ALL recent candles with confirm=1.
+	 * Without this guard, we'd emit 500 candle.closed events in <1 second.
+	 * We only emit candle.closed for NEW candles (openTime > lastProcessed).
+	 */
+	private lastClosedTime = new Map<string, number>();
 
-  constructor(private readonly events: EventEmitter2) {}
+	/**
+	 * After connect/reconnect, the first message batch is a snapshot.
+	 * We must absorb it without triggering sessions.
+	 * Set to true on connect, flipped to false after first in-progress candle (confirm=0).
+	 * Because confirm=0 means we're receiving live updates → the snapshot is done.
+	 */
+	private snapshotPhase = true;
 
-  onModuleInit() {
-    this.connect();
-  }
+	constructor(private readonly events: EventEmitter2) {}
 
-  onModuleDestroy() {
-    this.alive = false;
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    if (this.pingTimer) clearInterval(this.pingTimer);
-    this.ws?.close();
-  }
+	onModuleInit() {
+		this.connect();
+	}
 
-  private connect() {
-    if (!this.alive) return;
-    this.log.log('Connecting to Bitget WS...');
+	onModuleDestroy() {
+		this.alive = false;
+		if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+		if (this.pingTimer) clearInterval(this.pingTimer);
+		this.ws?.close();
+	}
 
-    this.ws = new WebSocket(WS_URL);
+	private connect() {
+		if (!this.alive) return;
+		this.log.log("Connecting to Bitget WS...");
 
-    this.ws.on('open', () => {
-      this.log.log('WS connected — subscribing to candle channels');
-      this.subscribe();
-      this.startPing();
-    });
+		this.ws = new WebSocket(WS_URL);
 
-    this.ws.on('message', (raw: Buffer | string) => {
-      try {
-        const str = raw.toString();
-        if (str === 'pong') return;
+		this.ws.on("open", () => {
+			this.log.log("WS connected — subscribing to candle channels");
+			this.snapshotPhase = true; // absorb initial snapshot
+			this.subscribe();
+			this.startPing();
+		});
 
-        const msg = JSON.parse(str);
-        if (msg.event === 'subscribe') return;
+		this.ws.on("message", (raw: Buffer | string) => {
+			try {
+				const str = raw.toString();
+				if (str === "pong") return;
 
-        if (msg.arg?.channel?.startsWith('candle') && Array.isArray(msg.data)) {
-          this.onCandleData(msg.arg.instId, msg.data);
-        }
-      } catch (e: any) {
-        this.log.error('WS parse: ' + e.message);
-      }
-    });
+				const msg = JSON.parse(str);
+				if (msg.event === "subscribe") return;
 
-    this.ws.on('close', (code: number) => {
-      this.log.warn('WS closed (code=' + code + ')');
-      this.stopPing();
-      this.scheduleReconnect();
-    });
+				if (msg.arg?.channel?.startsWith("candle") && Array.isArray(msg.data)) {
+					this.onCandleData(msg.arg.instId, msg.data);
+				}
+			} catch (e: any) {
+				this.log.error("WS parse: " + e.message);
+			}
+		});
 
-    this.ws.on('error', (e: Error) => {
-      this.log.error('WS error: ' + e.message);
-    });
-  }
+		this.ws.on("close", (code: number) => {
+			this.log.warn("WS closed (code=" + code + ")");
+			this.stopPing();
+			this.scheduleReconnect();
+		});
 
-  private subscribe() {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    const args = TRACKED_SYMBOLS.map((s) => ({
-      instType: 'USDT-FUTURES', channel: 'candle' + GRANULARITY, instId: s,
-    }));
-    this.ws.send(JSON.stringify({ op: 'subscribe', args }));
-    this.log.log('Subscribed: ' + TRACKED_SYMBOLS.join(', '));
-  }
+		this.ws.on("error", (e: Error) => {
+			this.log.error("WS error: " + e.message);
+		});
+	}
 
-  /**
-   * Bitget v2 candle format per row:
-   * [ts, open, high, low, close, volCoin, volUsdt, confirm]
-   * confirm = "1" → candle closed, "0" → in progress
-   */
-  private onCandleData(symbol: string, data: any[]) {
-    for (const row of data) {
-      const openTimeMs = Number(row[0]);
-      const candle: CandleEvent = {
-        symbol, granularity: GRANULARITY,
-        openTime: new Date(openTimeMs),
-        open: Number(row[1]), high: Number(row[2]),
-        low: Number(row[3]), close: Number(row[4]),
-        volume: Number(row[5]),
-      };
-      const confirm = String(row[7] ?? '0');
+	private subscribe() {
+		if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+		const args = TRACKED_SYMBOLS.map((s) => ({
+			instType: "USDT-FUTURES",
+			channel: "candle" + GRANULARITY,
+			instId: s,
+		}));
+		this.ws.send(JSON.stringify({ op: "subscribe", args }));
+		this.log.log("Subscribed: " + TRACKED_SYMBOLS.join(", "));
+	}
 
-      if (confirm === '1') {
-        // Deduplicate: only emit if this candle is NEWER than the last one we processed.
-        // On reconnect, Bitget sends a snapshot of ALL recent candles with confirm=1.
-        const lastTs = this.lastClosedTime.get(symbol) ?? 0;
-        if (openTimeMs <= lastTs) {
-          // Already processed this candle (or an older one) — store but don't trigger sessions
-          this.events.emit('candle.update', candle);
-          continue;
-        }
-        this.lastClosedTime.set(symbol, openTimeMs);
-        this.events.emit('candle.closed', candle);
-      } else {
-        this.events.emit('candle.update', candle);
-      }
-    }
-  }
+	/**
+	 * Bitget v2 candle format per row:
+	 * [ts, open, high, low, close, volCoin, volUsdt, confirm]
+	 * confirm = "1" → candle closed, "0" → in progress
+	 */
+	private onCandleData(symbol: string, data: any[]) {
+		for (const row of data) {
+			const openTimeMs = Number(row[0]);
+			const candle: CandleEvent = {
+				symbol,
+				granularity: GRANULARITY,
+				openTime: new Date(openTimeMs),
+				open: Number(row[1]),
+				high: Number(row[2]),
+				low: Number(row[3]),
+				close: Number(row[4]),
+				volume: Number(row[5]),
+			};
+			const confirm = String(row[7] ?? "0");
 
-  private startPing() {
-    this.stopPing();
-    this.pingTimer = setInterval(() => {
-      if (this.ws?.readyState === WebSocket.OPEN) this.ws.send('ping');
-    }, 25_000);
-  }
+			if (confirm === "0") {
+				// In-progress candle → snapshot phase is over, we're receiving live data now
+				if (this.snapshotPhase) {
+					this.snapshotPhase = false;
+					this.log.log(
+						`Snapshot absorbed for ${symbol}, now live (last closed: ${new Date(this.lastClosedTime.get(symbol) ?? 0).toISOString()})`,
+					);
+				}
+				this.events.emit("candle.update", candle);
+			} else {
+				// confirm = "1" — candle closed
+				// Always track the latest timestamp for this symbol
+				const lastTs = this.lastClosedTime.get(symbol) ?? 0;
+				if (openTimeMs > lastTs) {
+					this.lastClosedTime.set(symbol, openTimeMs);
+				}
 
-  private stopPing() {
-    if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
-  }
+				if (this.snapshotPhase) {
+					// Still in snapshot phase → store candle but don't process sessions
+					this.events.emit("candle.update", candle);
+				} else if (openTimeMs <= lastTs) {
+					// Already seen this candle (duplicate) → store only
+					this.events.emit("candle.update", candle);
+				} else {
+					// New candle, live phase → process!
+					this.events.emit("candle.closed", candle);
+				}
+			}
+		}
+	}
 
-  private scheduleReconnect() {
-    if (!this.alive) return;
-    const d = 3000 + Math.random() * 2000;
-    this.log.log('Reconnecting in ' + Math.round(d) + 'ms...');
-    this.reconnectTimer = setTimeout(() => this.connect(), d);
-  }
+	private startPing() {
+		this.stopPing();
+		this.pingTimer = setInterval(() => {
+			if (this.ws?.readyState === WebSocket.OPEN) this.ws.send("ping");
+		}, 25_000);
+	}
+
+	private stopPing() {
+		if (this.pingTimer) {
+			clearInterval(this.pingTimer);
+			this.pingTimer = null;
+		}
+	}
+
+	private scheduleReconnect() {
+		if (!this.alive) return;
+		const d = 3000 + Math.random() * 2000;
+		this.log.log("Reconnecting in " + Math.round(d) + "ms...");
+		this.reconnectTimer = setTimeout(() => this.connect(), d);
+	}
 }
