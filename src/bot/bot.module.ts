@@ -13,7 +13,10 @@ import { StrategyModule } from '../strategy/strategy.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Session, Candle, Position, Trade, PositionTpTarget, SignalEvaluation, SignalConditionCheck]),
+    TypeOrmModule.forFeature([
+      Session, Candle, Position, Trade, PositionTpTarget,
+      SignalEvaluation, SignalConditionCheck,
+    ]),
     StrategyModule,
   ],
   providers: [BotService, BitgetClientService, BitgetWsService],

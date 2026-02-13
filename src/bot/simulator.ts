@@ -147,9 +147,34 @@ export class Simulator {
       if (!done) {
         const [reason, exitP] = this.checkExit(pos, price);
         if (exitP !== null && reason !== null) {
-          const [trade, full] = this.closePart(pos, exitP, now, pos.qty, reason);
-          closed.push(trade);
-          done = full;
+          // Close remaining qty split by unfilled TP targets for granular tracking
+          const unfilled = pos.tpTargets.filter((t) => !t.hit && t.qty > 0);
+          if (unfilled.length > 1) {
+            // Multiple TP targets remain — create a trade for each
+            for (const t of unfilled) {
+              const remQty = Math.max(0, t.qty - t.filledQty);
+              if (remQty <= 0 || pos.qty <= 0) continue;
+              const q = Math.min(pos.qty, remQty);
+              const label = t.label ? `${reason} (${t.label})` : reason;
+              const [trade, full] = this.closePart(pos, exitP, now, q, label);
+              closed.push(trade);
+              t.hit = true;
+              t.filledQty = t.qty;
+              done = full;
+              if (done) break;
+            }
+            // Close any remaining dust
+            if (!done && pos.qty > 1e-12) {
+              const [trade, full] = this.closePart(pos, exitP, now, pos.qty, reason);
+              closed.push(trade);
+              done = full;
+            }
+          } else {
+            // Single target or no targets — close all at once
+            const [trade, full] = this.closePart(pos, exitP, now, pos.qty, reason);
+            closed.push(trade);
+            done = full;
+          }
         }
       }
 
