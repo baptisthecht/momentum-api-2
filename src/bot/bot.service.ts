@@ -230,7 +230,7 @@ export class BotService implements OnModuleInit {
       const t = sp.tpTargets[i];
       await this.tpRepo.save(this.tpRepo.create({
         positionId: saved.id, sortOrder: i, price: t.price,
-        ratio: t.ratio, targetQty: t.qty, filledQty: 0, hit: false, label: t.label,
+        ratio: t.ratio, targetQty: t.qty, filledQty: 0, hit: false, label: t.label ?? undefined,
       }));
     }
 

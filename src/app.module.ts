@@ -34,11 +34,11 @@ import { SignalEvaluation, SignalConditionCheck } from './signal-evaluation/sign
       inject: [ConfigService],
       useFactory: (c: ConfigService) => ({
         type: 'postgres' as const,
-        host: c.get('DB_HOST', 'localhost'),
+        host: c.get<string>('DB_HOST', 'localhost'),
         port: c.get<number>('DB_PORT', 5432),
-        username: c.get('DB_USERNAME', 'momentum'),
-        password: c.get('DB_PASSWORD', 'momentum_secret'),
-        database: c.get('DB_NAME', 'momentum'),
+        username: c.get<string>('DB_USERNAME', 'momentum'),
+        password: c.get<string>('DB_PASSWORD', 'momentum_secret'),
+        database: c.get<string>('DB_NAME', 'momentum'),
         entities: [
           User, Strategy, StrategyTpTemplate, SymbolOverride, SymbolOverrideTpTemplate,
           Session, Candle, Position, PositionTpTarget, Trade,
