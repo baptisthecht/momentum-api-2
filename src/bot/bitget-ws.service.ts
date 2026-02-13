@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import WebSocket from 'ws';
+import { WebSocket } from 'ws';
 
 const WS_URL = 'wss://ws.bitget.com/v2/ws/public';
 
