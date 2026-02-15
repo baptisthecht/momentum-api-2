@@ -1,4 +1,4 @@
-mport { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { OhlcvBar } from './indicators';
 import { OrderSide } from '../position/position.entity';
 
