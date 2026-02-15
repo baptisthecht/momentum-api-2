@@ -29,68 +29,158 @@ export class BitgetClientService {
     }
   }
 
+  /**
+   * Build signed headers for Bitget V2 API.
+   * Signature: base64( HMAC-SHA256( secret, timestamp + METHOD + path + body ) )
+   * Matches Python BitgetAuthClient._sign() exactly.
+   */
+  private async makeHeaders(
+    apiSecret: string, apiKey: string, passphrase: string,
+    method: string, path: string, bodyStr: string,
+  ) {
+    const crypto = await import('crypto');
+    const ts = String(Date.now());
+    // Python: base64.b64encode( hmac.new(secret, content, sha256).digest() )
+    const sig = crypto.createHmac('sha256', apiSecret)
+      .update(ts + method + path + bodyStr)
+      .digest('base64');
+    return {
+      headers: {
+        'ACCESS-KEY': apiKey,
+        'ACCESS-SIGN': sig,
+        'ACCESS-TIMESTAMP': ts,
+        'ACCESS-PASSPHRASE': passphrase,
+        'Content-Type': 'application/json',
+      },
+      timestamp: ts,
+    };
+  }
+
   async placeOrder(p: {
     apiKey: string; apiSecret: string; passphrase: string;
     symbol: string; side: OrderSide; qty: number; leverage: number;
     sl?: number; tp?: number;
   }): Promise<any> {
     const axios = (await import('axios')).default;
-    const crypto = await import('crypto');
     if (!p.apiKey || !p.apiSecret || !p.passphrase) throw new Error('Missing Bitget API credentials');
 
-    const makeHeaders = (method: string, path: string, bodyStr: string) => {
-      const ts = String(Date.now());
-      const sig = crypto.createHmac('sha256', p.apiSecret).update(ts + method + path + bodyStr).digest('base64');
-      return {
-        'ACCESS-KEY': p.apiKey, 'ACCESS-SIGN': sig,
-        'ACCESS-TIMESTAMP': ts, 'ACCESS-PASSPHRASE': p.passphrase,
-        'Content-Type': 'application/json',
-      };
-    };
+    const isBuy = p.side === OrderSide.LONG;
 
-    // 1. Set leverage before placing order
+    // ââââââââââââââââââââââââââââââââââââââââââââ
+    // 1. Set leverage (same as Python ensure_leverage)
+    // ââââââââââââââââââââââââââââââââââââââââââââ
     try {
       const levPath = '/api/v2/mix/account/set-leverage';
-      const levBody = JSON.stringify({
-        symbol: p.symbol, productType: 'USDT-FUTURES', marginCoin: 'USDT',
-        leverage: String(p.leverage), holdSide: p.side === OrderSide.LONG ? 'long' : 'short',
-      });
-      await axios.post(BASE + levPath, JSON.parse(levBody), {
-        headers: makeHeaders('POST', levPath, levBody), timeout: 10000,
-      });
+      const levBody: Record<string, any> = {
+        symbol: p.symbol,
+        productType: 'USDT-FUTURES',
+        marginCoin: 'USDT',
+        leverage: String(p.leverage),
+        marginMode: 'crossed',
+      };
+      // Python: hold_side only in hedge mode. We pass it for safety.
+      levBody.holdSide = isBuy ? 'long' : 'short';
+
+      const levStr = JSON.stringify(levBody);
+      const { headers: levHeaders } = await this.makeHeaders(
+        p.apiSecret, p.apiKey, p.passphrase, 'POST', levPath, levStr,
+      );
+      await axios.post(BASE + levPath, levBody, { headers: levHeaders, timeout: 10000 });
       this.logger.log(`Leverage set to ${p.leverage}x for ${p.symbol} ${p.side}`);
     } catch (e: any) {
       const errData = e.response?.data ?? {};
-      this.logger.warn(`Leverage set failed (may be ok): ${errData.msg ?? e.message}`);
+      this.logger.warn(`Leverage set warning: ${errData.msg ?? e.message}`);
     }
 
-    // 2. Place the order
+    // ââââââââââââââââââââââââââââââââââââââââââââ
+    // 2. Place order â matches Python place_order() exactly
+    //    Python body: { productType, symbol, marginCoin, size, side, orderType, marginMode, clientOid }
+    //    Python side: "buy" or "sell" (one-way mode)
+    //    Python: NO presetStopSurplusPrice in body (TP/SL are separate TPSL orders)
+    // ââââââââââââââââââââââââââââââââââââââââââââ
     const path = '/api/v2/mix/order/place-order';
-    const tradeSide = p.side === OrderSide.LONG ? 'open_long' : 'open_short';
+    const clientOid = `bot#${Date.now()}`;
     const body: Record<string, any> = {
-      symbol: p.symbol, productType: 'USDT-FUTURES', marginCoin: 'USDT',
-      marginMode: 'crossed', side: tradeSide, orderType: 'market', size: String(p.qty),
+      productType: 'USDT-FUTURES',
+      symbol: p.symbol,
+      marginCoin: 'USDT',
+      size: String(p.qty),
+      side: isBuy ? 'buy' : 'sell',
+      orderType: 'market',
+      marginMode: 'crossed',
+      clientOid,
     };
-    if (p.sl) body.presetStopLossPrice = String(p.sl);
-    if (p.tp) body.presetTakeProfitPrice = String(p.tp);
 
     const bodyStr = JSON.stringify(body);
-    this.logger.log(`Placing order: ${tradeSide} ${p.qty} ${p.symbol} | SL=${p.sl} TP=${p.tp} | Body: ${bodyStr}`);
+    const sideLabel = isBuy ? 'LONG' : 'SHORT';
+    this.logger.log(`Placing order: ${sideLabel} ${p.qty} ${p.symbol} | Body: ${bodyStr}`);
+
+    const { headers } = await this.makeHeaders(
+      p.apiSecret, p.apiKey, p.passphrase, 'POST', path, bodyStr,
+    );
 
     try {
-      const resp = await axios.post(BASE + path, body, {
-        headers: makeHeaders('POST', path, bodyStr), timeout: 10000,
-      });
+      const resp = await axios.post(BASE + path, body, { headers, timeout: 10000 });
       if (resp.data?.code !== '00000') {
         throw new Error('Bitget rejected: ' + JSON.stringify(resp.data));
       }
-      this.logger.log('Order placed: ' + tradeSide + ' ' + p.qty + ' ' + p.symbol);
+      this.logger.log(`Order placed: ${sideLabel} ${p.qty} ${p.symbol} | orderId=${resp.data?.data?.orderId}`);
+
+      // ââââââââââââââââââââââââââââââââââââââââââââ
+      // 3. Place TP/SL as separate TPSL orders (same as Python _submit_tpsl_orders)
+      //    Uses /api/v2/mix/order/place-tpsl-order
+      // ââââââââââââââââââââââââââââââââââââââââââââ
+      const holdSide = isBuy ? 'long' : 'short';
+      if (p.tp) await this.placeTpsl(p, p.symbol, p.qty, holdSide, 'profit_plan', p.tp);
+      if (p.sl) await this.placeTpsl(p, p.symbol, p.qty, holdSide, 'loss_plan', p.sl);
+
       return resp.data;
     } catch (e: any) {
-      // Extract the real error from Bitget
       const errData = e.response?.data;
       const errMsg = errData ? JSON.stringify(errData) : e.message;
       throw new Error(`Order failed [${e.response?.status ?? '?'}]: ${errMsg}`);
+    }
+  }
+
+  /**
+   * Place a TP or SL order via the TPSL endpoint.
+   * Matches Python place_tpsl_order() exactly.
+   */
+  private async placeTpsl(
+    creds: { apiKey: string; apiSecret: string; passphrase: string },
+    symbol: string, size: number, holdSide: string,
+    planType: string, triggerPrice: number,
+  ): Promise<void> {
+    const axios = (await import('axios')).default;
+    const tpslPath = '/api/v2/mix/order/place-tpsl-order';
+    const label = planType === 'profit_plan' ? 'TP' : 'SL';
+
+    const tpslBody: Record<string, any> = {
+      productType: 'USDT-FUTURES',
+      symbol,
+      marginCoin: 'USDT',
+      size: String(size),
+      planType,
+      holdSide,
+      triggerPrice: String(triggerPrice),
+      triggerType: 'market_price',
+    };
+
+    const tpslStr = JSON.stringify(tpslBody);
+    const { headers } = await this.makeHeaders(
+      creds.apiSecret, creds.apiKey, creds.passphrase, 'POST', tpslPath, tpslStr,
+    );
+
+    try {
+      const resp = await axios.post(BASE + tpslPath, tpslBody, { headers, timeout: 10000 });
+      if (resp.data?.code !== '00000') {
+        this.logger.warn(`${label} order warning: ${JSON.stringify(resp.data)}`);
+      } else {
+        this.logger.log(`${label} placed: ${holdSide} ${triggerPrice} for ${symbol}`);
+      }
+    } catch (e: any) {
+      const errData = e.response?.data;
+      this.logger.warn(`${label} failed: ${errData ? JSON.stringify(errData) : e.message}`);
     }
   }
 }
