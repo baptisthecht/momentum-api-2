@@ -1,6 +1,7 @@
-import { Controller, Get, Put, Body, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Put, Body, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags, ApiOperation } from '@nestjs/swagger';
 import { UserService } from './user.service';
+import { BitgetClientService } from '../bot/bitget-client.service';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { UpdateBitgetKeysDto } from './dto/update-bitget-keys.dto';
@@ -10,7 +11,10 @@ import { UpdateBitgetKeysDto } from './dto/update-bitget-keys.dto';
 @Controller('users')
 @UseGuards(JwtAuthGuard)
 export class UserController {
-  constructor(private readonly userService: UserService) {}
+  constructor(
+    private readonly userService: UserService,
+    private readonly bitget: BitgetClientService,
+  ) {}
 
   @Get('me')
   @ApiOperation({ summary: 'Get current user profile' })
@@ -26,5 +30,16 @@ export class UserController {
   ) {
     await this.userService.updateBitgetCredentials(user.id, dto.apiKey, dto.apiSecret, dto.passphrase);
     return { message: 'Bitget credentials updated' };
+  }
+
+  @Post('me/test-credentials')
+  @ApiOperation({ summary: 'Test Bitget API credentials by fetching account info' })
+  async testCredentials(@CurrentUser() user: { id: string }) {
+    const u = await this.userService.findById(user.id);
+    if (!u?.bitgetApiKey || !u?.bitgetApiSecret || !u?.bitgetPassphrase) {
+      return { ok: false, error: 'No Bitget credentials configured' };
+    }
+
+    return this.bitget.testCredentials(u.bitgetApiKey, u.bitgetApiSecret, u.bitgetPassphrase);
   }
 }
