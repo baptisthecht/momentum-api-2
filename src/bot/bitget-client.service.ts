@@ -16,7 +16,7 @@ export class BitgetClientService {
       const resp = await PUBLIC_CLIENT.getFuturesHistoricCandles({
         symbol,
         productType: productType as any,
-        granularity,
+        granularity as any,
         limit: String(limit),
       });
       const rows: any[] = Array.isArray(resp?.data) ? resp.data : [];
@@ -125,7 +125,7 @@ export class BitgetClientService {
         planType: planType as any,
         holdSide: holdSide as any,
         triggerPrice: String(triggerPrice),
-        triggerType: 'market_price',
+        triggerType: 'mark_price',
       });
       this.logger.log(`${label} placed: ${holdSide} ${triggerPrice} for ${symbol}`);
     } catch (e: any) {
