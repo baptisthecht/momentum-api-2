@@ -16,7 +16,7 @@ export class BitgetClientService {
       const resp = await PUBLIC_CLIENT.getFuturesHistoricCandles({
         symbol,
         productType: productType as any,
-        granularity as any,
+        granularity: granularity as any,
         limit: String(limit),
       });
       const rows: any[] = Array.isArray(resp?.data) ? resp.data : [];
