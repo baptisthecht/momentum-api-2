@@ -90,7 +90,7 @@ export class BitgetWsService implements OnModuleInit, OnModuleDestroy {
 				if (msg.arg?.channel?.startsWith("candle") && Array.isArray(msg.data)) {
 					this.onCandleData(msg.arg.instId, msg.data);
 				}
-			} catch (e: any) {
+			} catch (e) {
 				this.log.error("WS parse: " + e.message);
 			}
 		});
