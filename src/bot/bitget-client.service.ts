@@ -16,7 +16,7 @@ export class BitgetClientService {
       const resp = await PUBLIC_CLIENT.getFuturesHistoricCandles({
         symbol,
         productType: productType as any,
-        granularity: granularity as any,
+        granularity,
         limit: String(limit),
       });
       const rows: any[] = Array.isArray(resp?.data) ? resp.data : [];
@@ -55,28 +55,27 @@ export class BitgetClientService {
 
     const client = this.makeClient(p.apiKey, p.apiSecret, p.passphrase);
     const isBuy = p.side === OrderSide.LONG;
-    const holdSide = isBuy ? 'long' : 'short';
 
-    // ââââââââââââââââââââââââââââââââââââââââââââ
+    // ────────────────────────────────────────────
     // 1. Set leverage (matches Python ensure_leverage)
-    // ââââââââââââââââââââââââââââââââââââââââââââ
+    //    One-way mode: NO holdSide. Only hedge mode passes holdSide.
+    // ────────────────────────────────────────────
     try {
       await client.setFuturesLeverage({
         symbol: p.symbol,
         productType: 'USDT-FUTURES',
         marginCoin: 'USDT',
         leverage: String(p.leverage),
-        holdSide: holdSide as any,
       });
-      this.logger.log(`Leverage set to ${p.leverage}x for ${p.symbol} ${holdSide}`);
+      this.logger.log(`Leverage set to ${p.leverage}x for ${p.symbol}`);
     } catch (e: any) {
       this.logger.warn(`Leverage set warning: ${e.body?.msg ?? e.message}`);
     }
 
-    // ââââââââââââââââââââââââââââââââââââââââââââ
+    // ────────────────────────────────────────────
     // 2. Place market order (matches Python place_order exactly)
-    //    side: "buy" or "sell" â one-way mode, no tradeSide
-    // ââââââââââââââââââââââââââââââââââââââââââââ
+    //    side: "buy" or "sell" — one-way mode, no tradeSide
+    // ────────────────────────────────────────────
     const sideLabel = isBuy ? 'LONG' : 'SHORT';
     this.logger.log(`Placing order: ${sideLabel} ${p.qty} ${p.symbol}`);
 
@@ -94,11 +93,13 @@ export class BitgetClientService {
 
       this.logger.log(`Order placed: ${sideLabel} ${p.qty} ${p.symbol} | orderId=${resp?.data?.orderId}`);
 
-      // ââââââââââââââââââââââââââââââââââââââââââââ
+      // ────────────────────────────────────────────
       // 3. Place TP/SL as separate TPSL orders (matches Python _submit_tpsl_orders)
-      // ââââââââââââââââââââââââââââââââââââââââââââ
-      if (p.tp) await this.placeTpsl(client, p.symbol, p.qty, holdSide, 'profit_plan', p.tp);
-      if (p.sl) await this.placeTpsl(client, p.symbol, p.qty, holdSide, 'loss_plan', p.sl);
+      //    tpsl_hold_side is always set even in one-way mode (Python L520)
+      // ────────────────────────────────────────────
+      const tpslHoldSide = isBuy ? 'long' : 'short';
+      if (p.tp) await this.placeTpsl(client, p.symbol, p.qty, tpslHoldSide, 'profit_plan', p.tp);
+      if (p.sl) await this.placeTpsl(client, p.symbol, p.qty, tpslHoldSide, 'loss_plan', p.sl);
 
       return resp;
     } catch (e: any) {
@@ -125,7 +126,7 @@ export class BitgetClientService {
         planType: planType as any,
         holdSide: holdSide as any,
         triggerPrice: String(triggerPrice),
-        triggerType: 'mark_price',
+        triggerType: 'market_price',
       });
       this.logger.log(`${label} placed: ${holdSide} ${triggerPrice} for ${symbol}`);
     } catch (e: any) {
