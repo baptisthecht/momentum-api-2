@@ -1,68 +1,115 @@
-import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Session, SessionStatus } from './session.entity';
-import { StrategyService } from '../strategy/strategy.service';
-import { StartSessionDto } from './dto/session.dto';
+import {
+	Injectable,
+	NotFoundException,
+	BadRequestException,
+	Logger,
+} from "@nestjs/common";
+import { InjectRepository } from "@nestjs/typeorm";
+import { Repository } from "typeorm";
+import { Session, SessionStatus } from "./session.entity";
+import { StrategyService } from "../strategy/strategy.service";
+import { UserService } from "../user/user.service";
+import { BitgetClientService } from "../bot/bitget-client.service";
+import { StartSessionDto } from "./dto/session.dto";
 
 @Injectable()
 export class SessionService {
-  private readonly logger = new Logger(SessionService.name);
+	private readonly logger = new Logger(SessionService.name);
 
-  constructor(
-    @InjectRepository(Session) private readonly sessionRepo: Repository<Session>,
-    private readonly strategyService: StrategyService,
-  ) {}
+	constructor(
+		@InjectRepository(Session)
+		private readonly sessionRepo: Repository<Session>,
+		private readonly strategyService: StrategyService,
+		private readonly userService: UserService,
+		private readonly bitget: BitgetClientService,
+	) {}
 
-  async start(userId: string, dto: StartSessionDto): Promise<Session> {
-    let strategy;
-    if (dto.strategyId) {
-      strategy = await this.strategyService.findById(dto.strategyId);
-      if (!strategy) throw new NotFoundException('Strategy not found');
-    } else {
-      strategy = await this.strategyService.findDefault();
-      if (!strategy) throw new BadRequestException('No default strategy available');
-    }
+	async start(userId: string, dto: StartSessionDto): Promise<Session> {
+		let strategy;
+		if (dto.strategyId) {
+			strategy = await this.strategyService.findById(dto.strategyId);
+			if (!strategy) throw new NotFoundException("Strategy not found");
+		} else {
+			strategy = await this.strategyService.findDefault();
+			if (!strategy)
+				throw new BadRequestException("No default strategy available");
+		}
 
-    const balance = dto.startingBalance ?? 1000;
-    const session = this.sessionRepo.create({
-      userId,
-      strategyId: strategy.id,
-      symbol: dto.symbol.toUpperCase(),
-      leverage: dto.leverage ?? 35,
-      simulation: dto.simulation ?? false,
-      startingBalance: balance,
-      currentBalance: balance,
-      currentEquity: balance,
-      riskPerTradePct: dto.riskPerTradePct ?? null,
-      maxNotionalUsdt: dto.maxNotionalUsdt ?? null,
-      minProfitUsdt: dto.minProfitUsdt ?? null,
-      status: SessionStatus.RUNNING,
-    });
+		const balance = dto.startingBalance ?? 1000;
+		const session = this.sessionRepo.create({
+			userId,
+			strategyId: strategy.id,
+			symbol: dto.symbol.toUpperCase(),
+			leverage: dto.leverage ?? 35,
+			simulation: dto.simulation ?? false,
+			startingBalance: balance,
+			currentBalance: balance,
+			currentEquity: balance,
+			riskPerTradePct: dto.riskPerTradePct ?? null,
+			maxNotionalUsdt: dto.maxNotionalUsdt ?? null,
+			minProfitUsdt: dto.minProfitUsdt ?? null,
+			status: SessionStatus.RUNNING,
+		});
 
-    const saved = await this.sessionRepo.save(session);
-    this.logger.log(`Session started: ${saved.id} (${saved.symbol}, user=${userId})`);
-    return saved;
-  }
+		const saved = await this.sessionRepo.save(session);
 
-  async stop(sessionId: string, userId: string): Promise<Session> {
-    const session = await this.sessionRepo.findOne({ where: { id: sessionId, userId } });
-    if (!session) throw new NotFoundException('Session not found');
-    if (session.status === SessionStatus.STOPPED) throw new BadRequestException('Already stopped');
-    session.status = SessionStatus.STOPPED;
-    session.stoppedAt = new Date();
-    return this.sessionRepo.save(session);
-  }
+		// Ensure hedge mode on Bitget when starting a real (non-simulation) session
+		if (!saved.simulation) {
+			const user = await this.userService.findById(userId);
+			if (
+				user?.bitgetApiKey &&
+				user?.bitgetApiSecret &&
+				user?.bitgetPassphrase
+			) {
+				await this.bitget.ensureHedgeMode(
+					user.bitgetApiKey,
+					user.bitgetApiSecret,
+					user.bitgetPassphrase,
+				);
+			} else {
+				this.logger.warn(
+					`Session ${saved.id}: no Bitget credentials found, skipping hedge mode check`,
+				);
+			}
+		}
 
-  findByUser(userId: string) {
-    return this.sessionRepo.find({ where: { userId }, relations: ['strategy'], order: { createdAt: 'DESC' } });
-  }
+		this.logger.log(
+			`Session started: ${saved.id} (${saved.symbol}, user=${userId})`,
+		);
+		return saved;
+	}
 
-  findById(sessionId: string, userId: string) {
-    return this.sessionRepo.findOne({ where: { id: sessionId, userId }, relations: ['strategy', 'positions', 'trades'] });
-  }
+	async stop(sessionId: string, userId: string): Promise<Session> {
+		const session = await this.sessionRepo.findOne({
+			where: { id: sessionId, userId },
+		});
+		if (!session) throw new NotFoundException("Session not found");
+		if (session.status === SessionStatus.STOPPED)
+			throw new BadRequestException("Already stopped");
+		session.status = SessionStatus.STOPPED;
+		session.stoppedAt = new Date();
+		return this.sessionRepo.save(session);
+	}
 
-  findRunning(userId: string) {
-    return this.sessionRepo.find({ where: { userId, status: SessionStatus.RUNNING }, relations: ['strategy'] });
-  }
+	findByUser(userId: string) {
+		return this.sessionRepo.find({
+			where: { userId },
+			relations: ["strategy"],
+			order: { createdAt: "DESC" },
+		});
+	}
+
+	findById(sessionId: string, userId: string) {
+		return this.sessionRepo.findOne({
+			where: { id: sessionId, userId },
+			relations: ["strategy", "positions", "trades"],
+		});
+	}
+
+	findRunning(userId: string) {
+		return this.sessionRepo.find({
+			where: { userId, status: SessionStatus.RUNNING },
+			relations: ["strategy"],
+		});
+	}
 }
