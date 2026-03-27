@@ -95,37 +95,40 @@ export class BotService implements OnModuleInit {
 	}
 
 	// ══════════════════════════════════════════════════════
-	//  Store candle (upsert)
+	//  Store candle (atomic upsert)
 	// ══════════════════════════════════════════════════════
 	private async storeCandle(ev: CandleEvent): Promise<Candle> {
-		const existing = await this.candleRepo.findOne({
+		// Use atomic upsert to avoid race conditions with concurrent updates
+		// PostgreSQL ON CONFLICT with GREATEST/LEAST to preserve max high and min low
+		await this.candleRepo.query(
+			`INSERT INTO candles (symbol, granularity, "openTime", open, high, low, close, volume)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			 ON CONFLICT (symbol, granularity, "openTime")
+			 DO UPDATE SET
+			   high = GREATEST(candles.high, EXCLUDED.high),
+			   low = LEAST(candles.low, EXCLUDED.low),
+			   close = EXCLUDED.close,
+			   volume = EXCLUDED.volume`,
+			[
+				ev.symbol,
+				ev.granularity,
+				ev.openTime,
+				ev.open,
+				ev.high,
+				ev.low,
+				ev.close,
+				ev.volume,
+			],
+		);
+
+		// Fetch and return the upserted candle
+		return this.candleRepo.findOneOrFail({
 			where: {
 				symbol: ev.symbol,
 				granularity: ev.granularity,
 				openTime: ev.openTime,
 			},
 		});
-
-		if (existing) {
-			existing.high = Math.max(existing.high, ev.high);
-			existing.low = Math.min(existing.low, ev.low);
-			existing.close = ev.close;
-			existing.volume = ev.volume;
-			return this.candleRepo.save(existing);
-		}
-
-		return this.candleRepo.save(
-			this.candleRepo.create({
-				symbol: ev.symbol,
-				granularity: ev.granularity,
-				openTime: ev.openTime,
-				open: ev.open,
-				high: ev.high,
-				low: ev.low,
-				close: ev.close,
-				volume: ev.volume,
-			}),
-		);
 	}
 
 	// ══════════════════════════════════════════════════════
