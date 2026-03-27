@@ -1,26 +1,26 @@
-import { Injectable, Logger, type OnModuleInit } from "@nestjs/common";
+import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { OnEvent } from "@nestjs/event-emitter";
 import { InjectRepository } from "@nestjs/typeorm";
-import { In, type Repository } from "typeorm";
+import { In, Repository } from "typeorm";
 import { Candle } from "../candle/candle.entity";
 import { OrderSide, Position } from "../position/position.entity";
 import { Session, SessionStatus } from "../session/session.entity";
 import {
-  EvaluationResult,
-  SignalConditionCheck,
-  SignalEvaluation,
+	EvaluationResult,
+	SignalConditionCheck,
+	SignalEvaluation,
 } from "../signal-evaluation/signal-evaluation.entity";
-import type { StrategyService } from "../strategy/strategy.service";
+import { StrategyService } from "../strategy/strategy.service";
 import { PositionTpTarget } from "../tp-target/position-tp-target.entity";
 import { Trade } from "../trade/trade.entity";
-import type { BitgetClientService } from "./bitget-client.service";
-import type { CandleEvent } from "./bitget-ws.service";
-import type { OhlcvBar } from "./indicators";
-import { type SimTrade, Simulator } from "./simulator";
+import { BitgetClientService } from "./bitget-client.service";
+import { CandleEvent } from "./bitget-ws.service";
+import { OhlcvBar } from "./indicators";
+import { SimTrade, Simulator } from "./simulator";
 import {
-  type EvaluationOutput,
-  SignalSide,
-  StrategyEngine,
+	EvaluationOutput,
+	SignalSide,
+	StrategyEngine,
 } from "./strategy-engine";
 
 @Injectable()
@@ -30,30 +30,36 @@ export class BotService implements OnModuleInit {
 	private readonly processing = new Set<string>();
 
 	constructor(
-    @InjectRepository(Session) private readonly sessionRepo: Repository<Session>,
-    @InjectRepository(Candle) private readonly candleRepo: Repository<Candle>,
-    @InjectRepository(Position) private readonly posRepo: Repository<Position>,
-    @InjectRepository(Trade) private readonly tradeRepo: Repository<Trade>,
-    @InjectRepository(PositionTpTarget) private readonly tpRepo: Repository<PositionTpTarget>,
-    @InjectRepository(SignalEvaluation) private readonly evalRepo: Repository<SignalEvaluation>,
-    @InjectRepository(SignalConditionCheck) private readonly checkRepo: Repository<SignalConditionCheck>,
-    private readonly strategyService: StrategyService,
-    private readonly bitget: BitgetClientService,
-  ) {}
+		@InjectRepository(Session)
+		private readonly sessionRepo: Repository<Session>,
+		@InjectRepository(Candle) private readonly candleRepo: Repository<Candle>,
+		@InjectRepository(Position) private readonly posRepo: Repository<Position>,
+		@InjectRepository(Trade) private readonly tradeRepo: Repository<Trade>,
+		@InjectRepository(PositionTpTarget)
+		private readonly tpRepo: Repository<PositionTpTarget>,
+		@InjectRepository(SignalEvaluation)
+		private readonly evalRepo: Repository<SignalEvaluation>,
+		@InjectRepository(SignalConditionCheck)
+		private readonly checkRepo: Repository<SignalConditionCheck>,
+		private readonly strategyService: StrategyService,
+		private readonly bitget: BitgetClientService,
+	) {}
 
 	async onModuleInit() {
 		this.log.log("BotService active — event-driven via WebSocket");
 	}
 
 	// ══════════════════════════════════════════════════════
-	//  EVENT: candle.tick → a new 5m candle started, process the previous one
-	//  Triggered by WS detecting openTime transition (confirm=0 with new timestamp)
-	//  The closed candle data is already in DB (stored via candle.update from confirm=1)
+	//  EVENT: Candle closed → store + process all sessions
 	// ══════════════════════════════════════════════════════
-	@OnEvent("candle.tick")
-	async onCandleTick(payload: { symbol: string }) {
-		const { symbol } = payload;
+	@OnEvent("candle.closed")
+	async onCandleClosed(ev: CandleEvent) {
+		const { symbol } = ev;
 
+		// 1. Store candle in DB (always, even without sessions)
+		const candle = await this.storeCandle(ev);
+
+		// 2. Skip if already processing this symbol (safety lock)
 		if (this.processing.has(symbol)) {
 			this.log.warn(`Already processing ${symbol}, skipping`);
 			return;
@@ -61,34 +67,16 @@ export class BotService implements OnModuleInit {
 		this.processing.add(symbol);
 
 		try {
-			// The latest candle in DB is the one that just closed (stored from confirm=1)
-			// Actually the SECOND-to-last might be the closed one, since the new candle
-			// just started getting updates. Load the 2 most recent to be safe.
-			const recentCandles = await this.candleRepo.find({
-				where: { symbol, granularity: "5m" },
-				order: { openTime: "DESC" },
-				take: 2,
-			});
-
-			if (recentCandles.length < 2) {
-				this.log.warn(`Not enough candles for ${symbol}`);
-				return;
-			}
-
-			// The second one (index 1) is the just-closed candle
-			const closedCandle = recentCandles[1];
-			this.log.log(
-				`Processing closed candle: ${symbol} @ ${closedCandle.openTime.toISOString()} close=${closedCandle.close}`,
-			);
-
+			// 3. Find all running sessions for this symbol
 			const sessions = await this.sessionRepo.find({
 				where: { symbol, status: SessionStatus.RUNNING },
 				relations: ["strategy", "strategy.tpTemplates", "user"],
 			});
 
+			// 4. Process each session
 			for (const session of sessions) {
 				try {
-					await this.processSession(session, closedCandle);
+					await this.processSession(session, candle);
 				} catch (e: any) {
 					this.log.error(`Session ${session.id}: ${e.message}`);
 				}
@@ -99,7 +87,7 @@ export class BotService implements OnModuleInit {
 	}
 
 	// ══════════════════════════════════════════════════════
-	//  EVENT: Candle update (in-progress or confirm=1) → just store
+	//  EVENT: Candle update (in-progress) → just store
 	// ══════════════════════════════════════════════════════
 	@OnEvent("candle.update")
 	async onCandleUpdate(ev: CandleEvent) {
@@ -110,13 +98,24 @@ export class BotService implements OnModuleInit {
 	//  Store candle (upsert)
 	// ══════════════════════════════════════════════════════
 	private async storeCandle(ev: CandleEvent): Promise<Candle> {
-		// Important: must be atomic to avoid race conditions between concurrent WS events.
-		// The unique index is on (symbol, granularity, openTime).
-		const row = await this.candleRepo
-			.createQueryBuilder()
-			.insert()
-			.into(Candle)
-			.values({
+		const existing = await this.candleRepo.findOne({
+			where: {
+				symbol: ev.symbol,
+				granularity: ev.granularity,
+				openTime: ev.openTime,
+			},
+		});
+
+		if (existing) {
+			existing.high = Math.max(existing.high, ev.high);
+			existing.low = Math.min(existing.low, ev.low);
+			existing.close = ev.close;
+			existing.volume = ev.volume;
+			return this.candleRepo.save(existing);
+		}
+
+		return this.candleRepo.save(
+			this.candleRepo.create({
 				symbol: ev.symbol,
 				granularity: ev.granularity,
 				openTime: ev.openTime,
@@ -125,20 +124,8 @@ export class BotService implements OnModuleInit {
 				low: ev.low,
 				close: ev.close,
 				volume: ev.volume,
-			})
-			.onConflict(`
-        ("symbol","granularity","openTime")
-        DO UPDATE SET
-          "open" = EXCLUDED."open",
-          "high" = GREATEST("candles"."high", EXCLUDED."high"),
-          "low" = LEAST("candles"."low", EXCLUDED."low"),
-          "close" = EXCLUDED."close",
-          "volume" = EXCLUDED."volume"
-      `)
-			.returning("*")
-			.execute();
-
-		return row.raw[0] as Candle;
+			}),
+		);
 	}
 
 	// ══════════════════════════════════════════════════════
@@ -365,7 +352,7 @@ export class BotService implements OnModuleInit {
 					targetQty: t.qty,
 					filledQty: 0,
 					hit: false,
-					label: t.label,
+					label: t.label ?? undefined,
 				}),
 			);
 		}
