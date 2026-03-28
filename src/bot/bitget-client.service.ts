@@ -5,7 +5,7 @@ import { OhlcvBar } from "./indicators";
 
 const PUBLIC_CLIENT = new RestClientV2();
 
-// Bitget size precision per symbol (decimal places allowed)
+// Bitget size precision per symbol (decimal places allowed for qty)
 const SIZE_PRECISION: Record<string, number> = {
 	BTCUSDT: 4,
 	ETHUSDT: 3,
@@ -22,6 +22,28 @@ const SIZE_PRECISION: Record<string, number> = {
 };
 const DEFAULT_SIZE_PRECISION = 4;
 
+// Bitget price precision per symbol (decimal places allowed for trigger prices)
+const PRICE_PRECISION: Record<string, number> = {
+	BTCUSDT: 1,
+	ETHUSDT: 2,
+	ADAUSDT: 4,
+	SOLUSDT: 2,
+	XRPUSDT: 4,
+	DOGEUSDT: 5,
+	BNBUSDT: 2,
+	MATICUSDT: 4,
+	DOTUSDT: 3,
+	LINKUSDT: 3,
+	AVAXUSDT: 2,
+	LTCUSDT: 2,
+};
+const DEFAULT_PRICE_PRECISION = 2;
+
+export interface TpTarget {
+	price: number;
+	ratio: number;
+}
+
 @Injectable()
 export class BitgetClientService {
 	private readonly logger = new Logger(BitgetClientService.name);
@@ -35,6 +57,15 @@ export class BitgetClientService {
 		const factor = Math.pow(10, precision);
 		const truncated = Math.floor(size * factor) / factor;
 		return truncated.toFixed(precision);
+	}
+
+	/**
+	 * Round price to the allowed decimal places for a symbol.
+	 * Uses round (not floor) to stay close to the intended price.
+	 */
+	private roundPrice(symbol: string, price: number): string {
+		const precision = PRICE_PRECISION[symbol] ?? DEFAULT_PRICE_PRECISION;
+		return price.toFixed(precision);
 	}
 
 	async fetchCandles(
@@ -86,7 +117,7 @@ export class BitgetClientService {
 
 	/**
 	 * Ensure the account is in hedge mode (double_hold).
-	 * Bitget returns an error if already in hedge mode — we ignore it.
+	 * Bitget returns an error if already in hedge mode â we ignore it.
 	 * Must be called before placing any order.
 	 */
 	async ensureHedgeMode(
@@ -102,7 +133,6 @@ export class BitgetClientService {
 			});
 			this.logger.log("Position mode set to hedge_mode");
 		} catch (e: any) {
-			// Bitget returns an error if already in hedge mode — safe to ignore
 			this.logger.warn(`ensureHedgeMode: ${e.body?.msg ?? e.message}`);
 		}
 	}
@@ -117,46 +147,39 @@ export class BitgetClientService {
 		leverage: number;
 		sl?: number;
 		tp?: number;
+		tpTargets?: TpTarget[];
 	}): Promise<any> {
 		if (!p.apiKey || !p.apiSecret || !p.passphrase)
 			throw new Error("Missing Bitget API credentials");
 
-		// Debug: log credential shapes (never log full secrets!)
 		this.logger.log(
 			`Credentials: key=${p.apiKey.substring(0, 6)}...${p.apiKey.slice(-4)} (len=${p.apiKey.length}), secret=len=${p.apiSecret.length}, pass=len=${p.passphrase.length}`,
 		);
 
 		const client = this.makeClient(p.apiKey, p.apiSecret, p.passphrase);
 		const isBuy = p.side === OrderSide.LONG;
+		const holdSide = isBuy ? "long" : "short";
 
-		// ────────────────────────────────────────────
-		// 0. Ensure hedge mode before anything else
-		// ────────────────────────────────────────────
+		// 0. Ensure hedge mode
 		await this.ensureHedgeMode(p.apiKey, p.apiSecret, p.passphrase);
 
-		// ────────────────────────────────────────────
-		// 1. Set leverage
-		//    Hedge mode: pass holdSide ('long' or 'short')
-		// ────────────────────────────────────────────
+		// 1. Set leverage (hedge mode requires holdSide)
 		try {
 			await client.setFuturesLeverage({
 				symbol: p.symbol,
 				productType: "USDT-FUTURES",
 				marginCoin: "USDT",
 				leverage: String(p.leverage),
-				holdSide: isBuy ? "long" : "short",
+				holdSide: holdSide as any,
 			});
 			this.logger.log(`Leverage set to ${p.leverage}x for ${p.symbol}`);
 		} catch (e: any) {
 			this.logger.warn(`Leverage set warning: ${e.body?.msg ?? e.message}`);
 		}
 
-		// ────────────────────────────────────────────
 		// 2. Place market order
-		//    Hedge mode V2: side = 'open_long' | 'open_short', tradeSide = 'open'
-		// ────────────────────────────────────────────
-		const sideLabel = isBuy ? "LONG" : "SHORT";
 		const sizeStr = this.truncateSize(p.symbol, p.qty);
+		const sideLabel = isBuy ? "LONG" : "SHORT";
 		this.logger.log(`Placing order: ${sideLabel} ${sizeStr} ${p.symbol}`);
 
 		try {
@@ -173,32 +196,32 @@ export class BitgetClientService {
 			});
 
 			this.logger.log(
-				`Order placed: ${sideLabel} ${p.qty} ${p.symbol} | orderId=${resp?.data?.orderId}`,
+				`Order placed: ${sideLabel} ${sizeStr} ${p.symbol} | orderId=${resp?.data?.orderId}`,
 			);
 
-			// ────────────────────────────────────────────
-			// 3. Place TP/SL as separate TPSL orders
-			//    holdSide is required in hedge mode
-			// ────────────────────────────────────────────
-			const tpslHoldSide = isBuy ? "long" : "short";
-			if (p.tp)
-				await this.placeTpsl(
-					client,
-					p.symbol,
-					sizeStr,
-					tpslHoldSide,
-					"profit_plan",
-					p.tp,
-				);
-			if (p.sl)
-				await this.placeTpsl(
-					client,
-					p.symbol,
-					sizeStr,
-					tpslHoldSide,
-					"loss_plan",
-					p.sl,
-				);
+			// 3. SL â full position qty, price rounded to symbol precision
+			if (p.sl) {
+				await this.placeTpsl(client, p.symbol, sizeStr, holdSide, "loss_plan", p.sl);
+			}
+
+			// 4. TP â one order per target with proportional qty
+			//    Falls back to single TP if no tpTargets provided
+			if (p.tpTargets && p.tpTargets.length > 0) {
+				const totalQty = parseFloat(sizeStr);
+				let remainingRatio = 1;
+				for (let i = 0; i < p.tpTargets.length; i++) {
+					const target = p.tpTargets[i];
+					const isLast = i === p.tpTargets.length - 1;
+					const ratio = isLast ? remainingRatio : Math.min(target.ratio, remainingRatio);
+					const targetSizeStr = this.truncateSize(p.symbol, totalQty * ratio);
+					if (parseFloat(targetSizeStr) <= 0) continue;
+					await this.placeTpsl(client, p.symbol, targetSizeStr, holdSide, "profit_plan", target.price);
+					remainingRatio = Math.max(0, remainingRatio - ratio);
+					if (remainingRatio <= 1e-6) break;
+				}
+			} else if (p.tp) {
+				await this.placeTpsl(client, p.symbol, sizeStr, holdSide, "profit_plan", p.tp);
+			}
 
 			return resp;
 		} catch (e: any) {
@@ -208,7 +231,8 @@ export class BitgetClientService {
 	}
 
 	/**
-	 * Place TP or SL via /api/v2/mix/order/place-tpsl-order
+	 * Place a single TP or SL via /api/v2/mix/order/place-tpsl-order
+	 * Prices are rounded to the symbol's allowed precision.
 	 */
 	private async placeTpsl(
 		client: RestClientV2,
@@ -219,6 +243,7 @@ export class BitgetClientService {
 		triggerPrice: number,
 	): Promise<void> {
 		const label = planType === "profit_plan" ? "TP" : "SL";
+		const priceStr = this.roundPrice(symbol, triggerPrice);
 		try {
 			await client.futuresSubmitTPSLOrder({
 				symbol,
@@ -227,11 +252,11 @@ export class BitgetClientService {
 				size,
 				planType: planType as any,
 				holdSide: holdSide as any,
-				triggerPrice: String(triggerPrice),
+				triggerPrice: priceStr,
 				triggerType: "mark_price",
 			});
 			this.logger.log(
-				`${label} placed: ${holdSide} ${triggerPrice} for ${symbol}`,
+				`${label} placed: holdSide=${holdSide} price=${priceStr} qty=${size} for ${symbol}`,
 			);
 		} catch (e: any) {
 			const errMsg = e.body ? JSON.stringify(e.body) : e.message;
