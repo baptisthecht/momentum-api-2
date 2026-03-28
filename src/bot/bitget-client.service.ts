@@ -1,7 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { RestClientV2 } from "bitget-api";
-import { OhlcvBar } from "./indicators";
 import { OrderSide } from "../position/position.entity";
+import { OhlcvBar } from "./indicators";
 
 const PUBLIC_CLIENT = new RestClientV2();
 
@@ -136,7 +136,7 @@ export class BitgetClientService {
 				productType: "USDT-FUTURES",
 				marginCoin: "USDT",
 				marginMode: "crossed",
-				side: (isBuy ? "open_long" : "open_short") as any,
+				side: isBuy ? "buy" : "sell",
 				tradeSide: "open" as any,
 				orderType: "market",
 				size: String(p.qty),
