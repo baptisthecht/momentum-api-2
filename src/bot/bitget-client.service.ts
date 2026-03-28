@@ -5,9 +5,37 @@ import { OhlcvBar } from "./indicators";
 
 const PUBLIC_CLIENT = new RestClientV2();
 
+// Bitget size precision per symbol (decimal places allowed)
+const SIZE_PRECISION: Record<string, number> = {
+	BTCUSDT: 4,
+	ETHUSDT: 3,
+	ADAUSDT: 0,
+	SOLUSDT: 2,
+	XRPUSDT: 1,
+	DOGEUSDT: 0,
+	BNBUSDT: 2,
+	MATICUSDT: 0,
+	DOTUSDT: 1,
+	LINKUSDT: 2,
+	AVAXUSDT: 2,
+	LTCUSDT: 3,
+};
+const DEFAULT_SIZE_PRECISION = 4;
+
 @Injectable()
 export class BitgetClientService {
 	private readonly logger = new Logger(BitgetClientService.name);
+
+	/**
+	 * Truncate quantity to the allowed decimal places for a symbol.
+	 * Uses floor to avoid exceeding available balance.
+	 */
+	private truncateSize(symbol: string, size: number): string {
+		const precision = SIZE_PRECISION[symbol] ?? DEFAULT_SIZE_PRECISION;
+		const factor = Math.pow(10, precision);
+		const truncated = Math.floor(size * factor) / factor;
+		return truncated.toFixed(precision);
+	}
 
 	async fetchCandles(
 		symbol: string,
@@ -128,7 +156,8 @@ export class BitgetClientService {
 		//    Hedge mode V2: side = 'open_long' | 'open_short', tradeSide = 'open'
 		// ────────────────────────────────────────────
 		const sideLabel = isBuy ? "LONG" : "SHORT";
-		this.logger.log(`Placing order: ${sideLabel} ${p.qty} ${p.symbol}`);
+		const sizeStr = this.truncateSize(p.symbol, p.qty);
+		this.logger.log(`Placing order: ${sideLabel} ${sizeStr} ${p.symbol}`);
 
 		try {
 			const resp = await client.futuresSubmitOrder({
@@ -139,7 +168,7 @@ export class BitgetClientService {
 				side: isBuy ? "buy" : "sell",
 				tradeSide: "open" as any,
 				orderType: "market",
-				size: String(p.qty),
+				size: sizeStr,
 				clientOid: `bot#${Date.now()}`,
 			});
 
@@ -156,7 +185,7 @@ export class BitgetClientService {
 				await this.placeTpsl(
 					client,
 					p.symbol,
-					p.qty,
+					sizeStr,
 					tpslHoldSide,
 					"profit_plan",
 					p.tp,
@@ -165,7 +194,7 @@ export class BitgetClientService {
 				await this.placeTpsl(
 					client,
 					p.symbol,
-					p.qty,
+					sizeStr,
 					tpslHoldSide,
 					"loss_plan",
 					p.sl,
@@ -184,7 +213,7 @@ export class BitgetClientService {
 	private async placeTpsl(
 		client: RestClientV2,
 		symbol: string,
-		size: number,
+		size: string,
 		holdSide: string,
 		planType: string,
 		triggerPrice: number,
@@ -195,7 +224,7 @@ export class BitgetClientService {
 				symbol,
 				productType: "USDT-FUTURES",
 				marginCoin: "USDT",
-				size: String(size),
+				size,
 				planType: planType as any,
 				holdSide: holdSide as any,
 				triggerPrice: String(triggerPrice),
