@@ -254,6 +254,15 @@ export class BotService implements OnModuleInit {
 	) {
 		const side =
 			sig.side === SignalSide.LONG ? OrderSide.LONG : OrderSide.SHORT;
+
+		const alreadyOpen = sim.openPositions.some((p) => p.side === side);
+		if (alreadyOpen) {
+			this.log.debug(
+				`Signal ${side} ignoré — position déjà ouverte pour ${session.symbol}`,
+			);
+			return;
+		}
+
 		const stopDist =
 			side === OrderSide.LONG
 				? sig.entryPrice - sig.sl
