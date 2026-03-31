@@ -22,12 +22,14 @@ import {
 	SignalSide,
 	StrategyEngine,
 } from "./strategy-engine";
+import { PositionManagerService } from "./position-manager.service";
 
 @Injectable()
 export class BotService implements OnModuleInit {
 	private readonly log = new Logger(BotService.name);
 	/** Lock per symbol to avoid concurrent processing */
 	private readonly processing = new Set<string>();
+	private readonly positionManager: PositionManagerService;
 
 	constructor(
 		@InjectRepository(Session)
@@ -322,8 +324,10 @@ export class BotService implements OnModuleInit {
 					qty,
 					leverage: lev,
 					sl: sig.sl,
-					tp: sig.tp,
 				});
+
+				this.positionManager.registerPosition(session.symbol);
+
 				this.log.log(`REAL ORDER: ${side} ${qty.toFixed(6)} ${session.symbol}`);
 			} catch (e: any) {
 				this.log.error("Order failed: " + e.message);

@@ -201,7 +201,14 @@ export class BitgetClientService {
 
 			// 3. SL â full position qty, price rounded to symbol precision
 			if (p.sl) {
-				await this.placeTpsl(client, p.symbol, sizeStr, holdSide, "loss_plan", p.sl);
+				await this.placeTpsl(
+					client,
+					p.symbol,
+					sizeStr,
+					holdSide,
+					"loss_plan",
+					p.sl,
+				);
 			}
 
 			// 4. TP â one order per target with proportional qty
@@ -212,15 +219,31 @@ export class BitgetClientService {
 				for (let i = 0; i < p.tpTargets.length; i++) {
 					const target = p.tpTargets[i];
 					const isLast = i === p.tpTargets.length - 1;
-					const ratio = isLast ? remainingRatio : Math.min(target.ratio, remainingRatio);
+					const ratio = isLast
+						? remainingRatio
+						: Math.min(target.ratio, remainingRatio);
 					const targetSizeStr = this.truncateSize(p.symbol, totalQty * ratio);
 					if (parseFloat(targetSizeStr) <= 0) continue;
-					await this.placeTpsl(client, p.symbol, targetSizeStr, holdSide, "profit_plan", target.price);
+					await this.placeTpsl(
+						client,
+						p.symbol,
+						targetSizeStr,
+						holdSide,
+						"profit_plan",
+						target.price,
+					);
 					remainingRatio = Math.max(0, remainingRatio - ratio);
 					if (remainingRatio <= 1e-6) break;
 				}
 			} else if (p.tp) {
-				await this.placeTpsl(client, p.symbol, sizeStr, holdSide, "profit_plan", p.tp);
+				await this.placeTpsl(
+					client,
+					p.symbol,
+					sizeStr,
+					holdSide,
+					"profit_plan",
+					p.tp,
+				);
 			}
 
 			return resp;
@@ -285,6 +308,107 @@ export class BitgetClientService {
 			const body = e.body ?? {};
 			this.logger.error(`Credentials test failed: ${JSON.stringify(body)}`);
 			return { ok: false, code: body.code, error: body.msg ?? e.message };
+		}
+	}
+
+	async closePartialPosition(p: {
+		apiKey: string;
+		apiSecret: string;
+		passphrase: string;
+		symbol: string;
+		side: OrderSide;
+		qty: number;
+	}): Promise<void> {
+		const client = this.makeClient(p.apiKey, p.apiSecret, p.passphrase);
+		const closeSide = p.side === OrderSide.LONG ? "sell" : "buy";
+		const sizeStr = this.truncateSize(p.symbol, p.qty);
+
+		const resp = await client.futuresSubmitOrder({
+			symbol: p.symbol,
+			productType: "USDT-FUTURES",
+			marginCoin: "USDT",
+			marginMode: "crossed",
+			side: closeSide,
+			tradeSide: "close" as any,
+			orderType: "market",
+			size: sizeStr,
+			clientOid: `tp#${Date.now()}`,
+		});
+
+		this.logger.log(
+			`Partial close sent: ${p.symbol} ${p.side} qty=${sizeStr} orderId=${resp?.data?.orderId}`,
+		);
+	}
+
+	/**
+	 * Close the full remaining position (safety fallback).
+	 */
+	async closeFullPosition(p: {
+		apiKey: string;
+		apiSecret: string;
+		passphrase: string;
+		symbol: string;
+		side: OrderSide;
+		qty: number;
+	}): Promise<void> {
+		const client = this.makeClient(p.apiKey, p.apiSecret, p.passphrase);
+		const closeSide = p.side === OrderSide.LONG ? "sell" : "buy";
+		const sizeStr = this.truncateSize(p.symbol, p.qty);
+
+		const resp = await client.futuresSubmitOrder({
+			symbol: p.symbol,
+			productType: "USDT-FUTURES",
+			marginCoin: "USDT",
+			marginMode: "crossed",
+			side: closeSide,
+			tradeSide: "close" as any,
+			orderType: "market",
+			size: sizeStr,
+			clientOid: `close#${Date.now()}`,
+		});
+
+		this.logger.log(
+			`Full close sent: ${p.symbol} ${p.side} qty=${sizeStr} orderId=${resp?.data?.orderId}`,
+		);
+	}
+
+	/**
+	 * Update the stop-loss for a position after TP1 is hit.
+	 * Cancels old TPSL order and places a new one at newSLPrice.
+	 */
+	async updateSL(p: {
+		apiKey: string;
+		apiSecret: string;
+		passphrase: string;
+		symbol: string;
+		side: OrderSide;
+		qty: number;
+		newSLPrice: number;
+	}): Promise<void> {
+		const client = this.makeClient(p.apiKey, p.apiSecret, p.passphrase);
+		const holdSide = p.side === OrderSide.LONG ? "long" : "short";
+		const sizeStr = this.truncateSize(p.symbol, p.qty);
+		const priceStr = this.roundPrice(p.symbol, p.newSLPrice);
+
+		try {
+			// Place new SL — Bitget will replace the existing one for the same holdSide
+			await client.futuresSubmitTPSLOrder({
+				symbol: p.symbol,
+				productType: "USDT-FUTURES",
+				marginCoin: "USDT",
+				size: sizeStr,
+				planType: "loss_plan" as any,
+				holdSide: holdSide as any,
+				triggerPrice: priceStr,
+				triggerType: "mark_price",
+			});
+			this.logger.log(
+				`SL updated to ${priceStr} for ${p.symbol} ${holdSide} qty=${sizeStr}`,
+			);
+		} catch (e: any) {
+			const errMsg = e.body ? JSON.stringify(e.body) : e.message;
+			this.logger.warn(`SL update failed: ${errMsg}`);
+			throw e;
 		}
 	}
 }
