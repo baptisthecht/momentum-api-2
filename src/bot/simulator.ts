@@ -1,6 +1,11 @@
 /**
  * Simulator - EXACT port of Python Simulator. Manages positions, SL/TP/trailing.
- * TS errors from v1 fixed: null → undefined for optional params, proper string types.
+ *
+ * LEVERAGE BUG FIX:
+ * The qty is already sized to account for leverage in openFromSignal:
+ *   qty = (equity * riskPct) / (stopDist * leverage)
+ * Therefore P&L = (exitPrice - entryPrice) * qty  — NO further leverage multiplication.
+ * Adding * leverage again was causing the simulator to report ~20x inflated P&L vs Bitget.
  */
 
 import { OrderSide } from '../position/position.entity';
@@ -147,10 +152,8 @@ export class Simulator {
       if (!done) {
         const [reason, exitP] = this.checkExit(pos, price);
         if (exitP !== null && reason !== null) {
-          // Close remaining qty split by unfilled TP targets for granular tracking
           const unfilled = pos.tpTargets.filter((t) => !t.hit && t.qty > 0);
           if (unfilled.length > 1) {
-            // Multiple TP targets remain — create a trade for each
             for (const t of unfilled) {
               const remQty = Math.max(0, t.qty - t.filledQty);
               if (remQty <= 0 || pos.qty <= 0) continue;
@@ -163,14 +166,12 @@ export class Simulator {
               done = full;
               if (done) break;
             }
-            // Close any remaining dust
             if (!done && pos.qty > 1e-12) {
               const [trade, full] = this.closePart(pos, exitP, now, pos.qty, reason);
               closed.push(trade);
               done = full;
             }
           } else {
-            // Single target or no targets — close all at once
             const [trade, full] = this.closePart(pos, exitP, now, pos.qty, reason);
             closed.push(trade);
             done = full;
@@ -261,7 +262,12 @@ export class Simulator {
   private closePart(pos: SimPosition, exitPrice: number, closeTime: Date, qty: number, reason: string): [SimTrade, boolean] {
     const q = Math.min(qty, pos.qty);
     const dir = pos.side === OrderSide.LONG ? 1 : -1;
-    const gross = (exitPrice - pos.entryPrice) * q * pos.leverage * dir;
+
+    // FIX: P&L = (exitPrice - entryPrice) * qty  — NO * leverage
+    // The qty was already sized accounting for leverage in openFromSignal:
+    //   qty = (equity * riskPct) / (stopDist * leverage)
+    // Multiplying by leverage again was causing ~20x inflated P&L vs Bitget reality.
+    const gross = (exitPrice - pos.entryPrice) * q * dir;
 
     let entryShare = 0;
     if (pos.originalQty > 0 && pos.entryFeeTotal > 0) {
@@ -278,8 +284,9 @@ export class Simulator {
     pos.realizedFees += totalFees;
     this.balance += net;
 
-    const notional = pos.entryPrice * q * pos.leverage;
-    const pnlPct = notional > 0 ? (net / notional) * 100 : 0;
+    // pnlPct relative to margin used (notional / leverage)
+    const margin = pos.entryPrice * q / pos.leverage;
+    const pnlPct = margin > 0 ? (net / margin) * 100 : 0;
     const full = q >= pos.qty - 1e-10;
 
     let riskShare = 0;
@@ -305,7 +312,8 @@ export class Simulator {
     let unr = 0;
     for (const p of this.openPositions) {
       const dir = p.side === OrderSide.LONG ? 1 : -1;
-      unr += (price - p.entryPrice) * p.qty * p.leverage * dir;
+      // FIX: unrealized P&L = (price - entryPrice) * qty — NO * leverage
+      unr += (price - p.entryPrice) * p.qty * dir;
       unr -= p.entryFeeRemaining;
     }
     this.equity = this.balance + unr;
