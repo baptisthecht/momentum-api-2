@@ -35,7 +35,8 @@
     "swagger-ui-express": "^5.0.0",
     "typeorm": "^0.3.17",
     "uuid": "^9.0.0",
-    "ws": "^8.14.0"
+    "ws": "^8.14.0",
+    "@nestjs/schedule": "^4.0.0"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.0.0",

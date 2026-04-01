@@ -6,13 +6,17 @@ import { SessionController } from "./session.controller";
 import { StrategyModule } from "../strategy/strategy.module";
 import { BotModule } from "../bot/bot.module";
 import { UserModule } from "../user/user.module";
+import { SyncModule } from "../sync/sync.module";
+import { Position } from "../position/position.entity";
+import { Trade } from "../trade/trade.entity";
 
 @Module({
 	imports: [
-		TypeOrmModule.forFeature([Session]),
+		TypeOrmModule.forFeature([Session, Position, Trade]),
 		StrategyModule,
 		BotModule,
 		UserModule,
+		SyncModule,
 	],
 	controllers: [SessionController],
 	providers: [SessionService],

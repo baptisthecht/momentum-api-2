@@ -41,6 +41,12 @@ export class Position {
   @Column({ type: 'float', default: 0 }) riskAmount: number;
   @Column({ type: 'float', default: 0 }) riskAmountRemaining: number;
 
+  // MOM-28: liquidation price fetched from Bitget after real order
+  @Column({ type: 'float', nullable: true }) liqPrice: number | null;
+
+  // MOM-29: feature snapshot for ML/audit (matches Python features dict)
+  @Column({ type: 'jsonb', nullable: true }) features: Record<string, number> | null;
+
   @OneToMany(() => PositionTpTarget, (t) => t.position, { cascade: true })
   tpTargets: PositionTpTarget[];
 

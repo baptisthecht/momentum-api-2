@@ -27,6 +27,8 @@ import { Trade } from "./trade/trade.entity";
 import { TradeModule } from "./trade/trade.module";
 import { User } from "./user/user.entity";
 import { UserModule } from "./user/user.module";
+import { RiskModule } from "./risk/risk.module";
+import { SyncModule } from "./sync/sync.module";
 
 @Module({
 	imports: [
@@ -69,6 +71,8 @@ import { UserModule } from "./user/user.module";
 		PositionModule,
 		TpTargetModule,
 		SignalEvaluationModule,
+		RiskModule,
+		SyncModule,
 	],
 })
 export class AppModule {}

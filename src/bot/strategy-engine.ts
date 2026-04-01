@@ -12,6 +12,7 @@ export interface StrategySignal {
   side: SignalSide; entryPrice: number; sl: number; tp: number;
   tpTargets: TpTarget[]; trailAtrMult: number | null;
   rMultiple: number | null; atrValue: number | null;
+  features: Record<string, number>;
 }
 
 export interface EvaluationOutput {
@@ -152,7 +153,20 @@ export class StrategyEngine {
     if (tps.length === 0) return null;
     const tp = tps[tps.length - 1].price;
     if (side === SignalSide.SHORT && tp <= 0) return null;
-    return { side, entryPrice: cl, sl, tp, tpTargets: tps, trailAtrMult: this.trailOn ? this.trailM : null, rMultiple: distR, atrValue: la };
+    // MOM-29: build features dict matching Python
+    const features: Record<string, number> = {
+      close: cl,
+      ema_fast: ef,
+      ema_slow: es,
+      rsi_14: lr,
+      atr_14: la,
+      distance_ema_fast: cl - ef,
+      distance_ema_slow: cl - es,
+      above_ema_slow: cl >= es ? 1.0 : 0.0,
+      side_long: side === SignalSide.LONG ? 1.0 : 0.0,
+      higher_trend_up: hUp ? 1.0 : 0.0,
+    };
+    return { side, entryPrice: cl, sl, tp, tpTargets: tps, trailAtrMult: this.trailOn ? this.trailM : null, rMultiple: distR, atrValue: la, features };
   }
 
   private buildTps(e: number, dR: number, side: SignalSide): TpTarget[] {
@@ -189,16 +203,40 @@ export class StrategyEngine {
     return out;
   }
 
+  /**
+   * MOM-07 FIX: align HTF candle boundaries to real calendar timestamps
+   * instead of sequential grouping. Matches Python's df.resample('Nmin', closed='right').
+   * Each HTF candle covers [floor, floor+N*5min).
+   */
   private htfTrend(bars: OhlcvBar[]): { close: number; ema: number } | null {
     if (this.trendMult <= 1) return null;
     const n = this.trendMult;
-    const re: OhlcvBar[] = [];
-    for (let i = 0; i + n - 1 < bars.length; i += n) {
-      const g = bars.slice(i, i + n);
-      re.push({ openTime: g[0].openTime, open: g[0].open, high: Math.max(...g.map((b) => b.high)), low: Math.min(...g.map((b) => b.low)), close: g[g.length - 1].close, volume: g.reduce((s, b) => s + b.volume, 0) });
+    const windowMs = n * 5 * 60 * 1000;
+
+    // Group bars by calendar-aligned HTF bucket
+    const buckets = new Map<number, OhlcvBar[]>();
+    for (const bar of bars) {
+      const ts = bar.openTime.getTime();
+      const bucket = Math.floor(ts / windowMs) * windowMs;
+      if (!buckets.has(bucket)) buckets.set(bucket, []);
+      buckets.get(bucket)!.push(bar);
     }
-    const rem = bars.length % n;
-    if (rem > 0) { const g = bars.slice(bars.length - rem); re.push({ openTime: g[0].openTime, open: g[0].open, high: Math.max(...g.map((b) => b.high)), low: Math.min(...g.map((b) => b.low)), close: g[g.length - 1].close, volume: g.reduce((s, b) => s + b.volume, 0) }); }
+
+    // Build HTF candles from sorted buckets
+    const re: OhlcvBar[] = [];
+    for (const [bucketTs, group] of [...buckets.entries()].sort((a, b) => a[0] - b[0])) {
+      if (group.length === 0) continue;
+      group.sort((a, b) => a.openTime.getTime() - b.openTime.getTime());
+      re.push({
+        openTime: new Date(bucketTs),
+        open: group[0].open,
+        high: Math.max(...group.map((b) => b.high)),
+        low: Math.min(...group.map((b) => b.low)),
+        close: group[group.length - 1].close,
+        volume: group.reduce((s, b) => s + b.volume, 0),
+      });
+    }
+
     if (re.length < this.trendEma + 2) return null;
     const c = re.map((b) => b.close);
     const e = ema(c, this.trendEma);
