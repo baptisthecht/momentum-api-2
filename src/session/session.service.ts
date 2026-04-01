@@ -167,7 +167,7 @@ export class SessionService {
 		const closedPositions = positions.filter((p) => p.isClosed);
 
 		// Live Bitget snapshot (real sessions only, cached)
-		let liveSnapshot = null;
+		let liveSnapshot: import('../sync/bitget-sync.service').SessionSnapshot | null = null;
 		if (!session.simulation && session.user?.bitgetApiKey) {
 			try {
 				liveSnapshot = await this.sync.getSnapshot(session);

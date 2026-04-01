@@ -41,11 +41,11 @@ export class BitgetSyncService {
    */
   async syncSession(session: Session): Promise<SyncResult> {
     if (session.simulation || !session.user?.bitgetApiKey) {
-      return { skipped: true, reason: 'simulation or no credentials' };
+      return { skipped: true, reason: 'simulation or no credentials', balanceUpdated: false, positionsReconciled: 0, externalClosuresDetected: 0, livePositions: [] };
     }
 
     const client = this.makeClient(session.user);
-    const result: SyncResult = { skipped: false, balanceUpdated: false, positionsReconciled: 0, externalClosuresDetected: 0 };
+    const result: SyncResult = { skipped: false, balanceUpdated: false, positionsReconciled: 0, externalClosuresDetected: 0, livePositions: [] };
 
     // 1. Balance
     const bal = await this.fetchBalance(client);
@@ -93,7 +93,7 @@ export class BitgetSyncService {
         result.livePositions = result.livePositions ?? [];
         result.livePositions.push({
           symbol: bitgetPos.symbol,
-          side: bitgetPos.holdSide,
+          side: bitgetPos.holdSide as 'long' | 'short',
           qty: parseFloat(bitgetPos.total ?? '0'),
           entryPrice: parseFloat(bitgetPos.openPriceAvg ?? '0'),
           markPrice: parseFloat(bitgetPos.markPrice ?? '0'),
@@ -132,11 +132,12 @@ export class BitgetSyncService {
     }
 
     // Positions (cached)
-    let positions: BitgetPosition[] = this.getCachedPositions(session.id);
+    let positions: BitgetPosition[] | null = this.getCachedPositions(session.id);
     if (!positions) {
       positions = await this.fetchPositions(client, session.symbol);
       this.positionsCache.set(session.id, { positions, ts: Date.now() });
     }
+    const resolvedPositions: BitgetPosition[] = positions ?? [];
 
     // Open TP/SL orders
     const openOrders = await this.fetchTpslOrders(client, session.symbol);
@@ -144,7 +145,7 @@ export class BitgetSyncService {
     return {
       isReal: true,
       balance: bal ?? { available: session.currentBalance, equity: session.currentEquity, unrealizedPnl: 0 },
-      positions: positions.map((p) => ({
+      positions: resolvedPositions.map((p) => ({
         symbol: p.symbol,
         side: p.holdSide as 'long' | 'short',
         qty: parseFloat(p.total ?? p.available ?? '0'),
@@ -192,8 +193,7 @@ export class BitgetSyncService {
     try {
       const resp = await client.getFuturesAccountAssets({
         productType: 'USDT-FUTURES',
-        marginCoin: 'USDT',
-      });
+      } as any);
       const assets: any[] = Array.isArray(resp?.data) ? resp.data : [];
       const usdt = assets.find((a: any) => a.marginCoin === 'USDT' || a.coin === 'USDT') ?? assets[0];
       if (!usdt) return null;
@@ -214,7 +214,7 @@ export class BitgetSyncService {
       const resp = await client.getFuturesPositions({
         productType: 'USDT-FUTURES',
         marginCoin: 'USDT',
-      });
+      } as any);
       const all: any[] = Array.isArray(resp?.data) ? resp.data : [];
       const filtered = symbol ? all.filter((p: any) => p.symbol === symbol) : all;
       // Only return positions with actual size
@@ -395,9 +395,9 @@ export interface SessionSnapshot {
 export interface SyncResult {
   skipped: boolean;
   reason?: string;
-  balanceUpdated?: boolean;
-  positionsReconciled?: number;
-  externalClosuresDetected?: number;
+  balanceUpdated: boolean;
+  positionsReconciled: number;
+  externalClosuresDetected: number;
   balance?: BalanceSnapshot;
-  livePositions?: LivePosition[];
+  livePositions: LivePosition[];
 }

@@ -20,4 +20,5 @@ export class PositionTpTarget {
   @Column({ type: 'float', default: 0 }) filledQty: number;
   @Column({ default: false }) hit: boolean;
   @Column({ nullable: true }) label: string;
+  @Column({ type: 'float', nullable: true }) executedPrice: number | null;
 }
