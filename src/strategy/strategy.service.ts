@@ -1,10 +1,10 @@
-import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Strategy } from './strategy.entity';
 import { StrategyTpTemplate } from './strategy-tp-template.entity';
-import { SymbolOverride } from './symbol-override.entity';
+import { Strategy } from './strategy.entity';
 import { SymbolOverrideTpTemplate } from './symbol-override-tp-template.entity';
+import { SymbolOverride } from './symbol-override.entity';
 
 // ── Default seeding data from settings.yaml ──
 const SYMBOL_OVERRIDES: Record<string, Record<string, any>> = {
@@ -46,7 +46,7 @@ export class StrategyService implements OnModuleInit {
     @InjectRepository(StrategyTpTemplate) private readonly tpRepo: Repository<StrategyTpTemplate>,
     @InjectRepository(SymbolOverride) private readonly overrideRepo: Repository<SymbolOverride>,
     @InjectRepository(SymbolOverrideTpTemplate) private readonly overrideTpRepo: Repository<SymbolOverrideTpTemplate>,
-  ) {}
+  ) { }
 
   async onModuleInit() {
     const existing = await this.strategyRepo.findOne({ where: { isDefault: true } });
@@ -104,4 +104,78 @@ export class StrategyService implements OnModuleInit {
     const override = strategy.symbolOverrides?.find((o) => o.symbol === symbol);
     return override ? override.applyTo(base) : base;
   }
+
+  async create(dto: any): Promise<Strategy> {
+    const { tpTemplates, symbolOverrides, ...fields } = dto;
+    const strategy = await this.strategyRepo.save(this.strategyRepo.create(fields)) as unknown as Strategy;
+    if (Array.isArray(tpTemplates)) {
+      for (let i = 0; i < tpTemplates.length; i++) {
+        await this.tpRepo.save(this.tpRepo.create({ strategyId: strategy.id, sortOrder: i, ...tpTemplates[i] }));
+      }
+    }
+    return this.findById(strategy.id) as Promise<Strategy>;
+  }
+
+  async update(id: string, dto: any): Promise<Strategy> {
+    const { tpTemplates, symbolOverrides, ...fields } = dto;
+    await this.strategyRepo.update(id, fields);
+    if (Array.isArray(tpTemplates)) {
+      await this.tpRepo.delete({ strategyId: id });
+      for (let i = 0; i < tpTemplates.length; i++) {
+        await this.tpRepo.save(this.tpRepo.create({ strategyId: id, sortOrder: i, ...tpTemplates[i] }));
+      }
+    }
+    if (Array.isArray(symbolOverrides)) {
+      for (const ov of symbolOverrides) {
+        const { tpTemplates: ovTps, id: ovId, ...ovFields } = ov;
+        if (ovId) {
+          await this.overrideRepo.update(ovId, ovFields);
+          if (Array.isArray(ovTps)) {
+            await this.overrideTpRepo.delete({ symbolOverrideId: ovId });
+            for (let i = 0; i < ovTps.length; i++) {
+              await this.overrideTpRepo.save(this.overrideTpRepo.create({ symbolOverrideId: ovId, sortOrder: i, ...ovTps[i] }));
+            }
+          }
+        } else {
+          const newOv = await this.overrideRepo.save(this.overrideRepo.create({ strategyId: id, ...ovFields })) as unknown as SymbolOverride;
+          if (Array.isArray(ovTps)) {
+            for (let i = 0; i < ovTps.length; i++) {
+              await this.overrideTpRepo.save(this.overrideTpRepo.create({ symbolOverrideId: newOv.id, sortOrder: i, ...ovTps[i] }));
+            }
+          }
+        }
+      }
+    }
+    return this.findById(id) as Promise<Strategy>;
+  }
+
+  async remove(id: string): Promise<void> {
+    await this.strategyRepo.delete(id);
+  }
+
+  async duplicate(id: string): Promise<Strategy> {
+    const src = await this.findById(id);
+    if (!src) throw new Error('Strategy not found');
+    const copy = await this.strategyRepo.save(this.strategyRepo.create({
+      ...src, id: undefined, name: src.name + ' (copie)', isDefault: false,
+      createdAt: undefined, updatedAt: undefined,
+    })) as unknown as Strategy;
+    for (let i = 0; i < (src.tpTemplates ?? []).length; i++) {
+      const tp = src.tpTemplates[i];
+      await this.tpRepo.save(this.tpRepo.create({ strategyId: copy.id, sortOrder: i, rMultiple: tp.rMultiple, ratio: tp.ratio, label: tp.label }));
+    }
+    for (const ov of (src.symbolOverrides ?? [])) {
+      const newOv = await this.overrideRepo.save(this.overrideRepo.create({
+        strategyId: copy.id, symbol: ov.symbol,
+        rsiOversold: ov.rsiOversold, rsiOverbought: ov.rsiOverbought,
+        emaTouchTolerancePct: ov.emaTouchTolerancePct, atrSlMult: ov.atrSlMult, atrTpMult: ov.atrTpMult,
+      }));
+      for (let i = 0; i < (ov.tpTemplates ?? []).length; i++) {
+        const tp = ov.tpTemplates[i];
+        await this.overrideTpRepo.save(this.overrideTpRepo.create({ symbolOverrideId: newOv.id, sortOrder: i, rMultiple: tp.rMultiple, ratio: tp.ratio }));
+      }
+    }
+    return this.findById(copy.id) as Promise<Strategy>;
+  }
+
 }
